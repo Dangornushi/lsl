@@ -11,9 +11,11 @@ use crossterm::{
 };
 use std::fs;
 use std::io::Result;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 extern crate chrono;
+use std::path::PathBuf;
 use std::{env, os::unix::fs::PermissionsExt};
 
 const GRUVBOX_BACKGROUND: Color = Color::Rgb {
@@ -22,11 +24,104 @@ const GRUVBOX_BACKGROUND: Color = Color::Rgb {
     b: 40,
 };
 
+struct TextBox {
+    color: Color,
+    width: usize,
+    height: usize,
+}
+
+impl TextBox {
+    fn new(color: Color, width: usize, height: usize) -> Self {
+        Self {
+            color,
+            width,
+            height,
+        }
+    }
+
+    pub fn put(&mut self, data: String) -> Result<()> {
+        execute!(
+            std::io::stderr(),
+            SetForegroundColor(self.color),
+            Print(data.clone()),
+        )?;
+
+        if self.width == data.len() {
+            return Ok(());
+        }
+
+        for _ in 0..self.width - data.len() {
+            execute!(std::io::stderr(), Print(" "))?;
+        }
+        Ok(())
+    }
+
+    pub fn change_width(&mut self, new_width: usize) {
+        self.width = new_width
+    }
+}
+
+struct TextLine {
+    width: usize,
+    now_width: usize,
+    text_box: TextBox,
+}
+
+impl TextLine {
+    fn new(width: usize) -> Self {
+        Self {
+            width,
+            now_width: 0,
+            text_box: TextBox {
+                color: Color::White,
+                width: (width),
+                height: (1),
+            },
+        }
+    }
+
+    fn create_text_box(&mut self, color: Color, width: usize, height: usize) {
+        self.now_width += width;
+        self.text_box = TextBox::new(color, width, height);
+    }
+
+    pub fn focus(&mut self) -> Result<()> {
+        self.now_width += 2;
+        execute!(std::io::stderr(), Print("> "))
+    }
+
+    pub fn unfocus(&mut self) -> Result<()> {
+        self.now_width += 2;
+        execute!(std::io::stderr(), Print("  "))
+    }
+
+    pub fn branck(&mut self) -> Result<()> {
+        for _ in 0..self.width as usize - self.now_width {
+            execute!(std::io::stderr(), Print(" "))?;
+        }
+        Ok(())
+    }
+
+    pub fn separate(&mut self) -> Result<()> {
+        self.now_width += 3;
+        execute!(
+            std::io::stderr(),
+            SetForegroundColor(Color::Blue),
+            Print(" │ "),
+            SetForegroundColor(Color::White),
+        )
+    }
+
+    fn draw(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 struct App {
     mostbig_size_filename: String,
     mostbig_size_length: usize,
     mostbig_permission: usize,
-    in_dir_files: Vec<String>,
+    in_dir_files: Vec<Vec<String>>,
     cursor: (u16, u16),
     window_width: u16,
     window_height: u16,
@@ -34,6 +129,7 @@ struct App {
     start_w: u16,
     start_h: u16,
     exit_flag: bool,
+    focus_page: usize,
 }
 
 impl App {
@@ -41,7 +137,7 @@ impl App {
         mostbig_size_filename: String,
         mostbig_size_length: usize,
         cursor: (u16, u16),
-        in_dir_files: Vec<String>,
+        in_dir_files: Vec<Vec<String>>,
         window_width: u16,
         window_height: u16,
         focus_index: usize,
@@ -60,20 +156,28 @@ impl App {
             start_w,
             start_h,
             exit_flag: false,
+            focus_page: 0,
         }
     }
 
     fn get_in_dir(&mut self) -> Result<()> {
         self.in_dir_files.clear();
+        let mut tmp_vec: Vec<String> = Vec::new();
+        let mut page_counter = 0;
         match fs::read_dir("./") {
             Ok(entries) => {
                 for entry in entries {
+                    if page_counter > self.window_height as usize - 3 {
+                        self.in_dir_files.push(tmp_vec.clone());
+                        tmp_vec.clear();
+                        page_counter = 0;
+                    }
                     let filename = entry.unwrap().file_name().to_string_lossy().to_string();
                     let filesize = std::fs::metadata(filename.clone())
                         .unwrap()
                         .len()
                         .to_string();
-                    self.in_dir_files.push(filename.clone());
+                    tmp_vec.push(filename.clone());
                     if self.mostbig_size_filename.len() < filename.len() {
                         self.mostbig_size_filename = filename.clone();
                     }
@@ -81,10 +185,14 @@ impl App {
                     if self.mostbig_size_length < filesize.len() {
                         self.mostbig_size_length = filesize.len();
                     }
+                    page_counter += 1;
 
                     //--------------------------------------------------------
 
                     //--------------------------------------------------------
+                }
+                if page_counter < self.window_height as usize - 2 {
+                    self.in_dir_files.push(tmp_vec.clone());
                 }
                 return Ok(());
             }
@@ -94,33 +202,21 @@ impl App {
         };
     }
 
-    fn render_dir_view(&mut self) {
+    fn render_dir_view(&mut self) -> Result<()> {
         execute!(
             std::io::stderr(),
             MoveTo(self.start_w + 0, self.start_h + 1)
-        );
+        )?;
         for i in 0..self.mostbig_size_filename.len() + 1 {
             execute!(
                 std::io::stderr(),
                 Clear(ClearType::CurrentLine),
                 MoveTo(0, (self.start_h + i as u16).try_into().unwrap())
-            );
+            )?;
         }
         self.focus_index = 0;
         self.get_in_dir().unwrap();
-    }
-
-    fn draw_background(&mut self) {
-        for i in 0..self.window_width {
-            for j in 0..self.window_height {
-                execute!(
-                    std::io::stderr(),
-                    MoveTo(self.start_w + i, self.start_h + j),
-                    SetBackgroundColor(GRUVBOX_BACKGROUND),
-                    Print(" "),
-                );
-            }
-        }
+        Ok(())
     }
 
     pub fn key_read(&mut self, max_down: usize) -> Result<()> {
@@ -136,7 +232,7 @@ impl App {
                 // pathに指されているものがディレクトリである
                 // cd ../
 
-                self.render_dir_view();
+                let _ = self.render_dir_view();
             }
             // ESC ----------------------------------------------------------------------------
             // SPACE ---
@@ -165,7 +261,7 @@ impl App {
                 let mv_to = format!(
                     "{}/{}",
                     env::current_dir().unwrap().to_str().unwrap(),
-                    self.in_dir_files[self.focus_index].clone()
+                    self.in_dir_files[self.focus_page][self.focus_index].clone()
                 );
 
                 let root = Path::new(&mv_to);
@@ -175,14 +271,14 @@ impl App {
                         // pathに指されているものがディレクトリである
                         // in_dir_dataをpathの内容に上書き
 
-                        self.render_dir_view();
+                        let _ = self.render_dir_view();
                     }
                     Err(_) => {
                         // pathに指されているものがファイルである
                         // enter keyを押した時にファイルであればvimを起動
                         execute!(std::io::stderr(), Show, LeaveAlternateScreen)?;
                         let mut child = Command::new("nvim")
-                            .arg(self.in_dir_files[self.focus_index].clone())
+                            .arg(self.in_dir_files[self.focus_page][self.focus_index].clone())
                             .spawn()
                             .unwrap();
                         child.wait().unwrap();
@@ -191,6 +287,7 @@ impl App {
                         //self.draw_background();
                     }
                 };
+                let _ = std::io::stdout().flush();
             }
             // Enter --------------------------------------------------------------------------
 
@@ -316,94 +413,104 @@ impl App {
         permission
     }
 
-    fn separate(&mut self) -> Result<()> {
-        execute!(
-            std::io::stderr(),
-            SetForegroundColor(Color::Blue),
-            Print(" │ "),
-            SetForegroundColor(Color::White),
-        )
-    }
     fn format_utc_to_string(&mut self, utc_time: &DateTime<Utc>) -> String {
-        utc_time.format("%Y年%m月%d日 %H時%M分%S秒 %Z").to_string()
+        utc_time.format("%Y/%m/%d %H:%M").to_string()
     }
 
-    fn draw_line(&mut self, draw_data: String) -> Result<()> {
+    fn draw_line(&mut self, draw_data: String, counter: usize) -> Result<()> {
         // 一行分の内容を描写
 
-        let filesize = std::fs::metadata(draw_data.clone())
-            .unwrap()
-            .len()
-            .to_string();
+        let mut text_line = TextLine::new(self.window_width as usize - 2);
 
-        // self.mostbig_size_filename -----------------------
-        execute!(
-            std::io::stderr(),
-            SetForegroundColor(Color::White),
-            Print(draw_data.clone()),
-        )?;
-
-        for _ in 0..self.mostbig_size_filename.len() - draw_data.len() {
-            execute!(std::io::stderr(), Print(" "),)?;
+        if counter == self.focus_index {
+            text_line.focus()?;
+        } else {
+            text_line.unfocus()?;
         }
-        // self.mostbig_size_filename -----------------------
-
-        self.separate()?;
-
-        // file size
-        // self.mostbig_size_filelength -----------------------
-        execute!(
-            std::io::stderr(),
-            SetForegroundColor(Color::Blue),
-            Print(filesize.clone()),
-        )?;
-
-        for _ in 0..self.mostbig_size_length - filesize.len() {
-            execute!(std::io::stderr(), Print(" "))?;
-        }
-        // self.mostbig_size_filelength -----------------------
-
-        execute!(
-            std::io::stderr(),
-            SetForegroundColor(Color::White),
-            Print(" B"),
-        )?;
-        // file size
-
-        self.separate()?;
 
         // file permission
         let metadata = fs::symlink_metadata(draw_data.clone()).expect("Failed to get metadata");
         let hex_permission = self.shinsu(metadata.permissions().mode() as i64, 8);
         let permission = self.generate_permission_strings(hex_permission);
 
-        execute!(std::io::stderr(), Print(permission.clone()))?;
-        // file permission
+        text_line.create_text_box(Color::White, permission.len(), 1);
+        text_line.text_box.put(permission.clone())?;
 
-        self.separate()?;
+        text_line.separate()?;
 
-        let created_time = metadata.created().unwrap();
-        let created_time: DateTime<Utc> = created_time.into();
-        let created_time = self.format_utc_to_string(&created_time);
+        // file size
+        let filesize = std::fs::metadata(draw_data.clone())
+            .unwrap()
+            .len()
+            .to_string();
 
-        execute!(std::io::stderr(), Print(created_time.clone()))?;
+        text_line.create_text_box(Color::Blue, self.mostbig_size_length, 1);
+        text_line.text_box.put(filesize)?;
 
-        self.separate()?;
+        text_line.create_text_box(Color::White, 2, 1);
+        text_line.text_box.put(String::from(" B"))?;
 
-        for _ in 0..(self.window_width - self.start_w) as usize
-            - 4
-            - self.mostbig_size_filename.len()
-            - 3
-            - self.mostbig_size_length
-            - 2
-            - 3
-            - permission.len()
-            - 3
-            - created_time.len()
-            - 1
-        {
-            execute!(std::io::stderr(), Print(" "));
-        }
+        text_line.separate()?;
+
+        // file created time
+        let created_time = self.format_utc_to_string(&(metadata.created().unwrap().into()));
+
+        text_line.create_text_box(Color::Yellow, created_time.len(), 1);
+        text_line.text_box.put(created_time.clone())?;
+
+        text_line.separate()?;
+
+        // file name
+
+        let filename_color = match std::fs::metadata(draw_data.clone()).unwrap().is_dir() {
+            true => {
+                // directory
+                Color::DarkBlue
+            }
+            false => {
+                // file
+
+                let index = match draw_data.find(".") {
+                    Some(index) => index,
+                    _ => 0,
+                };
+
+                let extracted_text = &draw_data[index..];
+
+                match extracted_text {
+                    ".rs" => Color::Rgb {
+                        r: 255,
+                        g: 158,
+                        b: 101,
+                    },
+                    _ => Color::White,
+                }
+            }
+        };
+
+        text_line.create_text_box(filename_color, self.mostbig_size_filename.len(), 1);
+        text_line.text_box.put(draw_data.clone())?;
+
+        text_line.separate()?;
+        text_line.branck()?;
+
+        /*
+                for _ in 0..(self.window_width - self.start_w) as usize
+                    - 4
+                    - self.mostbig_size_filename.len()
+                    - 3
+                    - self.mostbig_size_length
+                    - 2
+                    - 3
+                    - permission.len()
+                    - 3
+                    - created_time.len()
+                    - 1
+                    - 1
+                {
+                    execute!(std::io::stderr(), Print(" "));
+                }
+        */
 
         Ok(())
     }
@@ -427,7 +534,11 @@ impl App {
             MoveTo(self.start_w, self.cursor.1 + self.start_h)
         )?;
 
-        for i in 0..print_strings.len() {
+        for i in 0..if print_strings.len() > self.window_height as usize - 2 {
+            self.window_height as usize - 2
+        } else {
+            print_strings.len()
+        } {
             execute!(
                 std::io::stderr(),
                 Print("│ "),
@@ -437,13 +548,7 @@ impl App {
 
             // 枠の中身-------------------------------------------------------------------------------
 
-            if i == self.focus_index {
-                execute!(std::io::stderr(), Print("> "))?;
-            } else {
-                execute!(std::io::stderr(), Print("  "))?;
-            }
-
-            self.draw_line(print_strings[i].clone());
+            let _ = self.draw_line(print_strings[i].clone(), i);
             // --------------------------------------------------------------------------------------
 
             execute!(std::io::stderr(), SetForegroundColor(Color::Blue),)?;
@@ -469,9 +574,13 @@ impl App {
         )?;
 
         // 何も表示することがない場合の空欄
-        for i in self.cursor.1..self.window_height - 2 {
+        for i in if print_strings.len() > self.window_height as usize - 2 {
+            0..0
+        } else {
+            self.cursor.1..self.window_height - 1
+        } {
             execute!(std::io::stderr(), Print("│"))?;
-            for i in 1..self.window_width - 1 {
+            for _ in 1..self.window_width - 1 {
                 execute!(std::io::stderr(), Print(" "))?;
             }
             execute!(
@@ -501,29 +610,17 @@ impl App {
         //self.draw_background();
         loop {
             // ui
-            let _ = self.ui(self.in_dir_files.clone());
+            let _ = self.ui(self.in_dir_files[self.focus_page].clone());
 
             // Key Read
-            let _ = self.key_read(self.in_dir_files.len());
+            let _ = self.key_read(
+                if self.in_dir_files.len() > self.window_height as usize - 1 {
+                    self.window_height as usize - 1
+                } else {
+                    self.in_dir_files[self.focus_page].len()
+                },
+            );
 
-            if self.exit_flag {
-                break;
-            }
-        }
-        execute!(std::io::stderr(), Show, LeaveAlternateScreen)?;
-        return Ok(());
-    }
-
-    pub fn sw(&mut self) -> Result<()> {
-        let v: Vec<String> = vec![String::from(""), String::from("Hello, World2!!")];
-        execute!(std::io::stderr(), Hide, EnterAlternateScreen)?;
-        self.draw_background();
-        loop {
-            // ui
-            let _ = self.ui(v.clone());
-
-            // Key Read
-            let _ = self.key_read(1);
             if self.exit_flag {
                 break;
             }
@@ -550,6 +647,6 @@ fn main() -> Result<()> {
     );
 
     let ret = app.main();
-    disable_raw_mode();
+    let _ = disable_raw_mode();
     ret
 }
