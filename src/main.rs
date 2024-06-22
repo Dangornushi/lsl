@@ -1,4 +1,5 @@
 use chrono::prelude::{DateTime, Datelike, Utc};
+use crossterm::queue;
 use crossterm::{
     cursor::{self, Hide, MoveTo, MoveToColumn, MoveToRow, Show},
     event::{read, Event, KeyCode, KeyEvent},
@@ -24,34 +25,90 @@ const GRUVBOX_BACKGROUND: Color = Color::Rgb {
     b: 40,
 };
 
+const GRUVBOX_FOCUS_BACKGROUND: Color = Color::Rgb {
+    r: 50,
+    g: 50,
+    b: 50,
+};
+
+#[derive(Debug, Copy, Clone)]
+enum Style {
+    Default,
+    Border,
+}
+#[derive(Debug, Copy, Clone)]
 struct TextBox {
     color: Color,
     width: usize,
     height: usize,
+    style: Style,
 }
-
 impl TextBox {
     fn new(color: Color, width: usize, height: usize) -> Self {
         Self {
             color,
             width,
             height,
+            style: Style::Default,
         }
     }
 
-    pub fn put(&mut self, data: String) -> Result<()> {
-        execute!(
-            std::io::stderr(),
-            SetForegroundColor(self.color),
-            Print(data.clone()),
-        )?;
+    pub fn style(&mut self, style: Style) -> TextBox {
+        self.style = style;
+        let r = self;
+        return *r;
+    }
 
-        if self.width == data.len() {
-            return Ok(());
-        }
-
-        for _ in 0..self.width - data.len() {
+    pub fn blank(&mut self, put_data: String) -> Result<()> {
+        for _ in put_data.len()..self.width as usize {
             execute!(std::io::stderr(), Print(" "))?;
+        }
+        Ok(())
+    }
+
+    fn put_over_border(&mut self) -> Result<()> {
+        // 上の枠
+        queue!(std::io::stderr(), Print("┌"))?;
+        for _ in 1..self.width - 1 {
+            queue!(std::io::stderr(), Print("─"))?;
+        }
+        queue!(std::io::stderr(), Print("┐\n"))?;
+        // -------------------------
+        Ok(())
+    }
+
+    fn put_under_border(&mut self) -> Result<()> {
+        // 下の枠
+        queue!(std::io::stderr(), Print("└"))?;
+        for _ in 1..self.width - 1 {
+            queue!(std::io::stderr(), Print("─"))?;
+        }
+        queue!(std::io::stderr(), Print("┘"))?;
+        // -------------------------
+        Ok(())
+    }
+
+    pub fn put(&mut self, data: String) -> Result<()> {
+        match self.style {
+            Style::Default => {
+                queue!(
+                    std::io::stderr(),
+                    SetForegroundColor(self.color),
+                    Print(data.clone()),
+                )?;
+
+                if self.width == data.len() {
+                    return Ok(());
+                }
+
+                for _ in 0..self.width - data.len() {
+                    queue!(std::io::stderr(), Print(" "))?;
+                }
+            }
+            Style::Border => {
+                self.put_over_border()?;
+                self.put_under_border()?;
+            }
         }
         Ok(())
     }
@@ -65,6 +122,7 @@ struct TextLine {
     width: usize,
     now_width: usize,
     text_box: TextBox,
+    beam_style: usize,
 }
 
 impl TextLine {
@@ -76,17 +134,29 @@ impl TextLine {
                 color: Color::White,
                 width: (width),
                 height: (1),
+                style: Style::Default,
             },
+            beam_style: 0,
         }
     }
 
-    fn create_text_box(&mut self, color: Color, width: usize, height: usize) {
+    fn set_beam_style(&mut self, style: usize) {
+        self.beam_style = style;
+    }
+
+    fn create_text_box(&mut self, color: Color, width: usize, height: usize) -> TextBox {
         self.now_width += width;
         self.text_box = TextBox::new(color, width, height);
+        return self.text_box.clone();
     }
 
     pub fn focus(&mut self) -> Result<()> {
         self.now_width += 2;
+
+        queue!(
+            std::io::stderr(),
+            SetBackgroundColor(GRUVBOX_FOCUS_BACKGROUND),
+        )?;
         execute!(std::io::stderr(), Print("> "))
     }
 
@@ -95,25 +165,59 @@ impl TextLine {
         execute!(std::io::stderr(), Print("  "))
     }
 
-    pub fn branck(&mut self) -> Result<()> {
-        for _ in 0..self.width as usize - self.now_width {
-            execute!(std::io::stderr(), Print(" "))?;
+    pub fn blank(&mut self) -> Result<()> {
+        match self.beam_style {
+            0 => {
+                for _ in 0..self.width as usize - self.now_width {
+                    queue!(std::io::stderr(), Print(" "))?;
+                }
+            }
+            1 => {
+                for _ in 0..self.width as usize - self.now_width {
+                    queue!(std::io::stderr(), Print("─"))?;
+                }
+            }
+            _ => {
+                for _ in 0..self.width as usize - self.now_width {
+                    queue!(std::io::stderr(), Print(" "))?;
+                }
+            }
         }
         Ok(())
     }
 
     pub fn separate(&mut self) -> Result<()> {
         self.now_width += 3;
-        execute!(
+        queue!(
             std::io::stderr(),
             SetForegroundColor(Color::Blue),
             Print(" │ "),
             SetForegroundColor(Color::White),
         )
     }
+}
 
-    fn draw(&mut self) -> Result<()> {
-        Ok(())
+struct Title {
+    text_box: TextBox,
+    width: usize,
+}
+
+impl Title {
+    fn new(width: usize) -> Self {
+        Self {
+            text_box: TextBox {
+                color: Color::White,
+                width: (width),
+                height: (1),
+                style: Style::Default,
+            },
+            width,
+        }
+    }
+
+    fn set(&mut self, title: String) -> Result<()> {
+        self.text_box = TextBox::new(Color::Cyan, 10, 1).style(Style::Border);
+        self.text_box.put(title)
     }
 }
 
@@ -130,6 +234,7 @@ struct App {
     start_h: u16,
     exit_flag: bool,
     focus_page: usize,
+    pwd: String,
 }
 
 impl App {
@@ -157,6 +262,7 @@ impl App {
             start_h,
             exit_flag: false,
             focus_page: 0,
+            pwd: String::new(),
         }
     }
 
@@ -166,6 +272,7 @@ impl App {
         let mut page_counter = 0;
         match fs::read_dir("./") {
             Ok(entries) => {
+                self.pwd = env::current_dir().unwrap().display().to_string();
                 for entry in entries {
                     if page_counter > self.window_height as usize - 3 {
                         self.in_dir_files.push(tmp_vec.clone());
@@ -203,12 +310,12 @@ impl App {
     }
 
     fn render_dir_view(&mut self) -> Result<()> {
-        execute!(
+        queue!(
             std::io::stderr(),
             MoveTo(self.start_w + 0, self.start_h + 1)
         )?;
         for i in 0..self.mostbig_size_filename.len() + 1 {
-            execute!(
+            queue!(
                 std::io::stderr(),
                 Clear(ClearType::CurrentLine),
                 MoveTo(0, (self.start_h + i as u16).try_into().unwrap())
@@ -237,20 +344,18 @@ impl App {
             // ESC ----------------------------------------------------------------------------
             // SPACE ---
             //
-            /*
             Event::Key(KeyEvent {
                 code: KeyCode::Char(' '),
                 ..
             }) => {
-                execute!(std::io::stderr(), Show, LeaveAlternateScreen)?;
+                queue!(std::io::stderr(), Show, LeaveAlternateScreen)?;
                 let mut sub_window =
                     App::new(String::from(""), 0, (0, 0), Vec::new(), 20, 10, 0, 100, 10);
-                let _ = sub_window.sw();
-                execute!(std::io::stderr(), Hide, EnterAlternateScreen)?;
+                let _ = sub_window.main();
+                queue!(std::io::stderr(), Hide, EnterAlternateScreen)?;
 
                 //self.draw_background()
             }
-             */
             // SPACE ---
 
             // Enter---------------------------------------------------------------------------
@@ -271,18 +376,19 @@ impl App {
                         // pathに指されているものがディレクトリである
                         // in_dir_dataをpathの内容に上書き
 
+                        self.focus_page = 0;
                         let _ = self.render_dir_view();
                     }
                     Err(_) => {
                         // pathに指されているものがファイルである
                         // enter keyを押した時にファイルであればvimを起動
-                        execute!(std::io::stderr(), Show, LeaveAlternateScreen)?;
+                        queue!(std::io::stderr(), Show, LeaveAlternateScreen)?;
                         let mut child = Command::new("nvim")
                             .arg(self.in_dir_files[self.focus_page][self.focus_index].clone())
                             .spawn()
                             .unwrap();
                         child.wait().unwrap();
-                        execute!(std::io::stderr(), Hide, EnterAlternateScreen)?;
+                        queue!(std::io::stderr(), Hide, EnterAlternateScreen)?;
 
                         //self.draw_background();
                     }
@@ -298,6 +404,9 @@ impl App {
             }) => {
                 if max_down > 1 && self.focus_index < max_down - 1 {
                     self.focus_index += 1
+                } else if self.in_dir_files.len() > self.focus_page + 1 {
+                    self.focus_page += 1;
+                    self.focus_index = 0;
                 }
             }
             Event::Key(KeyEvent {
@@ -306,6 +415,9 @@ impl App {
             }) => {
                 if self.focus_index > 0 {
                     self.focus_index -= 1
+                } else if 0 < self.focus_page {
+                    self.focus_page -= 1;
+                    self.focus_index = self.window_height as usize - 3;
                 }
             }
             Event::Key(KeyEvent {
@@ -491,8 +603,7 @@ impl App {
         text_line.create_text_box(filename_color, self.mostbig_size_filename.len(), 1);
         text_line.text_box.put(draw_data.clone())?;
 
-        text_line.separate()?;
-        text_line.branck()?;
+        text_line.blank()?;
 
         /*
                 for _ in 0..(self.window_width - self.start_w) as usize
@@ -508,28 +619,59 @@ impl App {
                     - 1
                     - 1
                 {
-                    execute!(std::io::stderr(), Print(" "));
+                    queue!(std::io::stderr(), Print(" "));
                 }
         */
 
+        queue!(std::io::stderr(), SetBackgroundColor(GRUVBOX_BACKGROUND))?;
         Ok(())
     }
 
     pub fn ui(&mut self, print_strings: Vec<String>) -> Result<()> {
-        execute!(std::io::stderr(), MoveTo(self.start_w, self.start_h))?;
-        execute!(
+        queue!(std::io::stderr(), MoveTo(self.start_w, self.start_h))?;
+        queue!(
             std::io::stderr(),
             SetForegroundColor(Color::Blue),
+            SetBackgroundColor(GRUVBOX_BACKGROUND),
             Print("┌")
         )?;
 
-        for _ in 1..self.window_width - 1 {
-            execute!(std::io::stderr(), Print("─"))?;
-        }
-        execute!(std::io::stderr(), Print("┐"))?;
+        let mut text_line = TextLine::new(self.window_width as usize - 2);
+        text_line.set_beam_style(1);
+
+        text_line
+            .create_text_box(Color::Cyan, self.pwd.len(), 1)
+            .put(self.pwd.clone())?;
+
+        text_line
+            .create_text_box(Color::Blue, 2, 1)
+            .put("-[".to_string())?;
+
+        let focus_page_char = (self.focus_page + 1).to_string();
+
+        text_line
+            .create_text_box(Color::Yellow, focus_page_char.clone().len(), 1)
+            .put(focus_page_char)?;
+
+        text_line
+            .create_text_box(Color::Yellow, 1, 1)
+            .put("/".to_string())?;
+
+        let in_dir_files_char = self.in_dir_files.len();
+        text_line
+            .create_text_box(Color::Yellow, in_dir_files_char.clone(), 1)
+            .put(in_dir_files_char.to_string())?;
+
+        text_line
+            .create_text_box(Color::Blue, 1, 1)
+            .put("]".to_string())?;
+
+        text_line.blank()?;
+
+        queue!(std::io::stderr(), Print("┐"))?;
         self.cursor.1 = 1;
-        execute!(std::io::stderr(), Print("\n"))?;
-        execute!(
+        queue!(std::io::stderr(), Print("\n"))?;
+        queue!(
             std::io::stderr(),
             MoveTo(self.start_w, self.cursor.1 + self.start_h)
         )?;
@@ -539,7 +681,7 @@ impl App {
         } else {
             print_strings.len()
         } {
-            execute!(
+            queue!(
                 std::io::stderr(),
                 Print("│ "),
                 SetForegroundColor(Color::Yellow),
@@ -551,10 +693,10 @@ impl App {
             let _ = self.draw_line(print_strings[i].clone(), i);
             // --------------------------------------------------------------------------------------
 
-            execute!(std::io::stderr(), SetForegroundColor(Color::Blue),)?;
+            queue!(std::io::stderr(), SetForegroundColor(Color::Blue),)?;
             self.cursor.0 = self.window_width - 1;
 
-            execute!(
+            queue!(
                 std::io::stderr(),
                 MoveToColumn((self.cursor.0 + self.start_w).try_into().unwrap()),
                 Print("│"),
@@ -568,7 +710,7 @@ impl App {
         }
         self.cursor.1 += print_strings.len() as u16 - 1;
 
-        execute!(
+        queue!(
             std::io::stderr(),
             MoveToRow(self.cursor.1 + self.start_h + 2),
         )?;
@@ -579,11 +721,11 @@ impl App {
         } else {
             self.cursor.1..self.window_height - 1
         } {
-            execute!(std::io::stderr(), Print("│"))?;
+            queue!(std::io::stderr(), Print("│"))?;
             for _ in 1..self.window_width - 1 {
-                execute!(std::io::stderr(), Print(" "))?;
+                queue!(std::io::stderr(), Print(" "))?;
             }
-            execute!(
+            queue!(
                 std::io::stderr(),
                 Print("│"),
                 MoveTo(
@@ -594,11 +736,11 @@ impl App {
         }
 
         // 下の枠
-        execute!(std::io::stderr(), Print("└"))?;
+        queue!(std::io::stderr(), Print("└"))?;
         for _ in 1..self.window_width - 1 {
-            execute!(std::io::stderr(), Print("─"))?;
+            queue!(std::io::stderr(), Print("─"))?;
         }
-        execute!(std::io::stderr(), Print("┘"))?;
+        queue!(std::io::stderr(), Print("┘"))?;
         // -------------------------
 
         Ok(())
@@ -608,10 +750,10 @@ impl App {
         self.get_in_dir()?;
         execute!(std::io::stderr(), Hide, EnterAlternateScreen)?;
         //self.draw_background();
+
         loop {
             // ui
             let _ = self.ui(self.in_dir_files[self.focus_page].clone());
-
             // Key Read
             let _ = self.key_read(
                 if self.in_dir_files.len() > self.window_height as usize - 1 {
