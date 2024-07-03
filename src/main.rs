@@ -1,13 +1,13 @@
-use chrono::prelude::{DateTime, Datelike, Utc};
+use chrono::prelude::{DateTime, Utc};
 use crossterm::queue;
 use crossterm::{
-    cursor::{self, Hide, MoveTo, MoveToColumn, MoveToRow, Show},
+    cursor::{Hide, MoveTo, MoveToColumn, MoveToRow, Show},
     event::{read, Event, KeyCode, KeyEvent},
     execute,
     style::{Color, Print, SetBackgroundColor, SetForegroundColor},
     terminal::{
-        self, disable_raw_mode, enable_raw_mode, size, window_size, Clear, ClearType,
-        EnterAlternateScreen, LeaveAlternateScreen, WindowSize,
+        disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
     },
 };
 use std::fs;
@@ -16,8 +16,15 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 extern crate chrono;
-use std::path::PathBuf;
 use std::{env, os::unix::fs::PermissionsExt};
+
+mod window;
+
+use crate::window::textbox::Style;
+use crate::window::window::Mode;
+use window::textbox::TextBox;
+use window::textline::TextLine;
+use window::window::Window;
 
 const GRUVBOX_BACKGROUND: Color = Color::Rgb {
     r: 40,
@@ -31,172 +38,6 @@ const GRUVBOX_FOCUS_BACKGROUND: Color = Color::Rgb {
     b: 50,
 };
 
-#[derive(Debug, Copy, Clone)]
-enum Style {
-    Default,
-    Border,
-}
-#[derive(Debug, Copy, Clone)]
-struct TextBox {
-    color: Color,
-    width: usize,
-    height: usize,
-    style: Style,
-}
-impl TextBox {
-    fn new(color: Color, width: usize, height: usize) -> Self {
-        Self {
-            color,
-            width,
-            height,
-            style: Style::Default,
-        }
-    }
-
-    pub fn style(&mut self, style: Style) -> TextBox {
-        self.style = style;
-        let r = self;
-        return *r;
-    }
-
-    pub fn blank(&mut self, put_data: String) -> Result<()> {
-        for _ in put_data.len()..self.width as usize {
-            execute!(std::io::stderr(), Print(" "))?;
-        }
-        Ok(())
-    }
-
-    fn put_over_border(&mut self) -> Result<()> {
-        // 上の枠
-        queue!(std::io::stderr(), Print("┌"))?;
-        for _ in 1..self.width - 1 {
-            queue!(std::io::stderr(), Print("─"))?;
-        }
-        queue!(std::io::stderr(), Print("┐\n"))?;
-        // -------------------------
-        Ok(())
-    }
-
-    fn put_under_border(&mut self) -> Result<()> {
-        // 下の枠
-        queue!(std::io::stderr(), Print("└"))?;
-        for _ in 1..self.width - 1 {
-            queue!(std::io::stderr(), Print("─"))?;
-        }
-        queue!(std::io::stderr(), Print("┘"))?;
-        // -------------------------
-        Ok(())
-    }
-
-    pub fn put(&mut self, data: String) -> Result<()> {
-        match self.style {
-            Style::Default => {
-                queue!(
-                    std::io::stderr(),
-                    SetForegroundColor(self.color),
-                    Print(data.clone()),
-                )?;
-
-                if self.width == data.len() {
-                    return Ok(());
-                }
-
-                for _ in 0..self.width - data.len() {
-                    queue!(std::io::stderr(), Print(" "))?;
-                }
-            }
-            Style::Border => {
-                self.put_over_border()?;
-                self.put_under_border()?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn change_width(&mut self, new_width: usize) {
-        self.width = new_width
-    }
-}
-
-struct TextLine {
-    width: usize,
-    now_width: usize,
-    text_box: TextBox,
-    beam_style: usize,
-}
-
-impl TextLine {
-    fn new(width: usize) -> Self {
-        Self {
-            width,
-            now_width: 0,
-            text_box: TextBox {
-                color: Color::White,
-                width: (width),
-                height: (1),
-                style: Style::Default,
-            },
-            beam_style: 0,
-        }
-    }
-
-    fn set_beam_style(&mut self, style: usize) {
-        self.beam_style = style;
-    }
-
-    fn create_text_box(&mut self, color: Color, width: usize, height: usize) -> TextBox {
-        self.now_width += width;
-        self.text_box = TextBox::new(color, width, height);
-        return self.text_box.clone();
-    }
-
-    pub fn focus(&mut self) -> Result<()> {
-        self.now_width += 2;
-
-        queue!(
-            std::io::stderr(),
-            SetBackgroundColor(GRUVBOX_FOCUS_BACKGROUND),
-        )?;
-        execute!(std::io::stderr(), Print("> "))
-    }
-
-    pub fn unfocus(&mut self) -> Result<()> {
-        self.now_width += 2;
-        execute!(std::io::stderr(), Print("  "))
-    }
-
-    pub fn blank(&mut self) -> Result<()> {
-        match self.beam_style {
-            0 => {
-                for _ in 0..self.width as usize - self.now_width {
-                    queue!(std::io::stderr(), Print(" "))?;
-                }
-            }
-            1 => {
-                for _ in 0..self.width as usize - self.now_width {
-                    queue!(std::io::stderr(), Print("─"))?;
-                }
-            }
-            _ => {
-                for _ in 0..self.width as usize - self.now_width {
-                    queue!(std::io::stderr(), Print(" "))?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn separate(&mut self) -> Result<()> {
-        self.now_width += 3;
-        queue!(
-            std::io::stderr(),
-            SetForegroundColor(Color::Blue),
-            Print(" │ "),
-            SetForegroundColor(Color::White),
-        )
-    }
-}
-
 struct Title {
     text_box: TextBox,
     width: usize,
@@ -205,12 +46,7 @@ struct Title {
 impl Title {
     fn new(width: usize) -> Self {
         Self {
-            text_box: TextBox {
-                color: Color::White,
-                width: (width),
-                height: (1),
-                style: Style::Default,
-            },
+            text_box: TextBox::new(Color::White, width, 1),
             width,
         }
     }
@@ -235,6 +71,8 @@ struct App {
     exit_flag: bool,
     focus_page: usize,
     pwd: String,
+    mode: Mode,
+    input_buffer: String,
 }
 
 impl App {
@@ -263,9 +101,12 @@ impl App {
             exit_flag: false,
             focus_page: 0,
             pwd: String::new(),
+            mode: Mode::Nomal,
+            input_buffer: String::new(),
         }
     }
 
+    // self.in_dir_filesの内容を更新
     fn get_in_dir(&mut self) -> Result<()> {
         self.in_dir_files.clear();
         let mut tmp_vec: Vec<String> = Vec::new();
@@ -293,10 +134,6 @@ impl App {
                         self.mostbig_size_length = filesize.len();
                     }
                     page_counter += 1;
-
-                    //--------------------------------------------------------
-
-                    //--------------------------------------------------------
                 }
                 if page_counter < self.window_height as usize - 2 {
                     self.in_dir_files.push(tmp_vec.clone());
@@ -326,8 +163,24 @@ impl App {
         Ok(())
     }
 
-    pub fn key_read(&mut self, max_down: usize) -> Result<()> {
-        // ------------------------------------------------------------------------------------
+    fn cd(&mut self, path: String) -> Result<()> {
+        let mv_to = format!("{}/{}", env::current_dir().unwrap().to_str().unwrap(), path);
+        match env::set_current_dir(Path::new(&mv_to)) {
+            Ok(_) => {
+                // pathに指されているものがディレクトリである
+                // in_dir_dataをpathの内容に上書き
+
+                self.focus_page = 0;
+                self.render_dir_view()
+            }
+            Err(e) => {
+                self.input_buffer.clear();
+                Err(e)
+            }
+        }
+    }
+
+    fn nomal_key_read(&mut self, max_down: usize) -> Result<()> {
         match read()? {
             // ESC ----------------------------------------------------------------------------
             Event::Key(KeyEvent {
@@ -348,11 +201,18 @@ impl App {
                 code: KeyCode::Char(' '),
                 ..
             }) => {
-                queue!(std::io::stderr(), Show, LeaveAlternateScreen)?;
-                let mut sub_window =
-                    App::new(String::from(""), 0, (0, 0), Vec::new(), 20, 10, 0, 100, 10);
-                let _ = sub_window.main();
-                queue!(std::io::stderr(), Hide, EnterAlternateScreen)?;
+                match read()? {
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char('f'),
+                        ..
+                    }) => {
+                        //commandmode
+                        self.mode = Mode::Command;
+                    }
+                    _ => {
+                        return Ok(());
+                    }
+                }
 
                 //self.draw_background()
             }
@@ -363,36 +223,20 @@ impl App {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                let mv_to = format!(
-                    "{}/{}",
-                    env::current_dir().unwrap().to_str().unwrap(),
-                    self.in_dir_files[self.focus_page][self.focus_index].clone()
-                );
-
-                let root = Path::new(&mv_to);
-
-                match env::set_current_dir(&root) {
-                    Ok(_) => {
-                        // pathに指されているものがディレクトリである
-                        // in_dir_dataをpathの内容に上書き
-
-                        self.focus_page = 0;
-                        let _ = self.render_dir_view();
-                    }
-                    Err(_) => {
+                match self.cd(self.in_dir_files[self.focus_page][self.focus_index].clone()) {
+                    Err(e) => {
                         // pathに指されているものがファイルである
                         // enter keyを押した時にファイルであればvimを起動
                         queue!(std::io::stderr(), Show, LeaveAlternateScreen)?;
+
                         let mut child = Command::new("nvim")
                             .arg(self.in_dir_files[self.focus_page][self.focus_index].clone())
-                            .spawn()
-                            .unwrap();
+                            .spawn()?;
                         child.wait().unwrap();
                         queue!(std::io::stderr(), Hide, EnterAlternateScreen)?;
-
-                        //self.draw_background();
                     }
-                };
+                    _ => {}
+                }
                 let _ = std::io::stdout().flush();
             }
             // Enter --------------------------------------------------------------------------
@@ -429,11 +273,44 @@ impl App {
 
             _ => {} // WASD ---------------------------------------------------------------------------
         }
-
-        // ------------------------------------------------------------------------------------
-        self.cursor.0 = 0;
         self.cursor.0 = 1;
         return Ok(());
+    }
+
+    fn command_key_read(&mut self) -> Result<()> {
+        if let Event::Key(KeyEvent { code, .. }) = read()? {
+            match code {
+                KeyCode::Esc => {
+                    self.input_buffer.clear();
+                    self.mode = Mode::Nomal;
+                }
+                KeyCode::Char(c) => {
+                    self.input_buffer.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.input_buffer.pop();
+                }
+                KeyCode::Enter => {
+                    self.cd(self.input_buffer.clone())?;
+                    let _ = std::io::stdout().flush();
+                    self.mode = Mode::Nomal;
+                }
+
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn key_read(&mut self, max_down: usize) -> Result<()> {
+        // ------------------------------------------------------------------------------------
+        return match self.mode {
+            Mode::Nomal => self.nomal_key_read(max_down),
+            Mode::Command => self.command_key_read(),
+            Mode::Edit => Ok(()),
+        };
+        // ------------------------------------------------------------------------------------
     }
 
     fn shinsu(&mut self, mut x: i64, b: i64) -> i64 {
@@ -546,7 +423,7 @@ impl App {
         let permission = self.generate_permission_strings(hex_permission);
 
         text_line.create_text_box(Color::White, permission.len(), 1);
-        text_line.text_box.put(permission.clone())?;
+        text_line.put(permission.clone())?;
 
         text_line.separate()?;
 
@@ -557,10 +434,10 @@ impl App {
             .to_string();
 
         text_line.create_text_box(Color::Blue, self.mostbig_size_length, 1);
-        text_line.text_box.put(filesize)?;
+        text_line.put(filesize)?;
 
         text_line.create_text_box(Color::White, 2, 1);
-        text_line.text_box.put(String::from(" B"))?;
+        text_line.put(String::from(" B"))?;
 
         text_line.separate()?;
 
@@ -568,7 +445,7 @@ impl App {
         let created_time = self.format_utc_to_string(&(metadata.created().unwrap().into()));
 
         text_line.create_text_box(Color::Yellow, created_time.len(), 1);
-        text_line.text_box.put(created_time.clone())?;
+        text_line.put(created_time.clone())?;
 
         text_line.separate()?;
 
@@ -601,7 +478,7 @@ impl App {
         };
 
         text_line.create_text_box(filename_color, self.mostbig_size_filename.len(), 1);
-        text_line.text_box.put(draw_data.clone())?;
+        text_line.put(draw_data.clone())?;
 
         text_line.blank()?;
 
@@ -627,7 +504,19 @@ impl App {
         Ok(())
     }
 
-    pub fn ui(&mut self, print_strings: Vec<String>) -> Result<()> {
+    fn find_dir(&mut self, serch_word: String, directory_vec: Vec<String>) -> Vec<String> {
+        let mut return_vec = vec![];
+
+        for i in directory_vec {
+            if i.starts_with(&serch_word) {
+                return_vec.push(i);
+            }
+        }
+
+        return_vec
+    }
+
+    fn nomal_ui(&mut self, print_strings: Vec<String>) -> Result<()> {
         queue!(std::io::stderr(), MoveTo(self.start_w, self.start_h))?;
         queue!(
             std::io::stderr(),
@@ -737,19 +626,131 @@ impl App {
 
         // 下の枠
         queue!(std::io::stderr(), Print("└"))?;
+
         for _ in 1..self.window_width - 1 {
             queue!(std::io::stderr(), Print("─"))?;
         }
         queue!(std::io::stderr(), Print("┘"))?;
         // -------------------------
+        Ok(())
+    }
+
+    pub fn ui(&mut self, print_strings: Vec<String>) -> Result<()> {
+        self.nomal_ui(print_strings)?;
+        match self.mode {
+            Mode::Nomal => {}
+            Mode::Edit => {}
+            Mode::Command => {
+                let auto_correct = self.find_dir(
+                    self.input_buffer.to_owned(),
+                    self.in_dir_files.get(self.focus_page).unwrap().to_owned(),
+                );
+
+                self.draw_auto_correct(auto_correct)?;
+
+                queue!(
+                    std::io::stderr(),
+                    SetBackgroundColor(GRUVBOX_BACKGROUND),
+                    MoveTo(self.start_w, self.start_h + self.window_height)
+                )?;
+
+                let mut text_line = TextLine::new(self.window_width as usize);
+
+                //text_line.set_frame_style(1);
+
+                text_line
+                    .create_text_box(Color::Blue, 4, 1)
+                    .put("└[".to_string())?;
+
+                text_line
+                    .create_text_box(Color::Blue, self.input_buffer.len(), 1)
+                    .put(self.input_buffer.clone())?;
+
+                text_line.blank()?;
+
+                text_line
+                    .create_text_box(Color::Blue, 4, 1)
+                    .put("]┘".to_string())?;
+            }
+        }
 
         Ok(())
+    }
+
+    fn auto_correct_line(&mut self, data: String, hight: u16) -> Result<()> {
+        queue!(std::io::stderr(), MoveTo(self.start_w + 2, hight,))?;
+        let mut border_line = TextLine::new(self.window_width as usize - 3);
+        border_line
+            .create_text_box(Color::Blue, data.len(), 1)
+            .put(data)?;
+        border_line.blank()?;
+
+        Ok(())
+    }
+
+    fn draw_auto_correct_notfound(&mut self) -> Result<()> {
+        // ---------------------------------------------------------
+        queue!(
+            std::io::stderr(),
+            MoveTo(
+                self.start_w + 1,
+                self.start_h + self.window_height as u16 - 1 - 2
+            )
+        )?;
+        let mut border_line = TextLine::new(self.window_width as usize - 2);
+        border_line.set_beam_style(1);
+        border_line.blank()?;
+
+        queue!(
+            std::io::stderr(),
+            MoveTo(
+                self.start_w + 2,
+                self.start_h + self.window_height as u16 - 2
+            )
+        )?;
+        let mut notfound_line = TextLine::new(self.window_width as usize - 4);
+        let width = notfound_line.get_width();
+        notfound_line
+            .create_text_box(Color::Red, width, 1)
+            .put("Not found".to_string())?;
+        // ---------------------------------------------------------
+        Ok(())
+    }
+
+    pub fn draw_auto_correct(&mut self, v: Vec<String>) -> Result<()> {
+        if v.is_empty() {
+            self.draw_auto_correct_notfound()
+        } else {
+            // 線を描き始める一番上（予測変換ウィンドウの上限ライン）------
+            let mut auto_correct_window = Window::new(0, self.window_height as usize - v.len())
+                .set_mode(Mode::Nomal)
+                .set_width(self.window_width as usize - 2)
+                .set_hight(v.len());
+            auto_correct_window.top_line()?;
+            // -----------------------------------------------------------
+
+            // 予測変換たち v -> 予想されるファイル・ディレクトリの集合---------------------------------------------------
+            for (_, item) in v.iter().enumerate() {
+                auto_correct_window
+                    .set_color(Color::Blue)
+                    .put((*item).clone())?;
+                /*
+                // 予想されるファイル・ディレクトリ名を羅列---------------------------------------------------------------
+                self.auto_correct_line(
+                    item.to_owned(),
+                    self.start_h + self.window_height - v.len() as u16 + /*<this>*/index.to_owned() as u16/*</this>*/ - 1,
+                )?;
+                //--------------------------------------------------------------------------------------------------------
+                */
+            }
+            // -----------------------------------------------------------------------------------------------------------
+            Ok(())
+        }
     }
 
     pub fn main(&mut self) -> Result<()> {
         self.get_in_dir()?;
         execute!(std::io::stderr(), Hide, EnterAlternateScreen)?;
-        //self.draw_background();
 
         loop {
             // ui
