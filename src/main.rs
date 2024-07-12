@@ -18,12 +18,14 @@ use std::process::Command;
 extern crate chrono;
 use std::{env, os::unix::fs::PermissionsExt};
 
+use std::fs::File;
+
 mod window;
 
-use crate::window::textbox::Style;
-use crate::window::window::Mode;
+use window::textbox::Style;
 use window::textbox::TextBox;
 use window::textline::TextLine;
+use window::window::Mode;
 use window::window::Window;
 
 const GRUVBOX_BACKGROUND: Color = Color::Rgb {
@@ -271,6 +273,20 @@ impl App {
                 self.exit_flag = true;
             }
 
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('n'),
+                ..
+            }) => {
+                self.mode = Mode::Addfile;
+            }
+
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('d'),
+                ..
+            }) => {
+                self.mode = Mode::Delfile;
+            }
+
             _ => {} // WASD ---------------------------------------------------------------------------
         }
         self.cursor.0 = 1;
@@ -303,12 +319,73 @@ impl App {
         Ok(())
     }
 
+    fn add_new_file_or_directory(&mut self) -> Result<()> {
+        if let Event::Key(KeyEvent { code, .. }) = read()? {
+            match code {
+                KeyCode::Esc => {
+                    self.input_buffer.clear();
+                    self.mode = Mode::Nomal;
+                }
+                KeyCode::Char(c) => {
+                    self.input_buffer.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.input_buffer.pop();
+                }
+                KeyCode::Enter => {
+                    let _ = std::io::stdout().flush();
+
+                    if self.input_buffer.len() != 0 {
+                        let mut file = File::create(self.input_buffer.clone())?;
+                        file.write_all(String::from("").as_bytes())?;
+                    }
+                    self.mode = Mode::Nomal;
+
+                    self.render_dir_view()?;
+                }
+
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn remove_accept(&mut self) -> Result<()> {
+        fs::remove_file(self.in_dir_files[self.focus_page][self.focus_index].clone())?;
+        self.get_in_dir()?;
+        Ok(())
+    }
+
+    fn remove_file_or_directory(&mut self) -> Result<()> {
+        if let Event::Key(KeyEvent { code, .. }) = read()? {
+            match code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Nomal;
+                }
+                KeyCode::Char('n') => {
+                    self.mode = Mode::Nomal;
+                }
+                KeyCode::Char('y') => {
+                    self.mode = Mode::Nomal;
+                    self.remove_accept()?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn key_read(&mut self, max_down: usize) -> Result<()> {
         // ------------------------------------------------------------------------------------
         return match self.mode {
             Mode::Nomal => self.nomal_key_read(max_down),
             Mode::Command => self.command_key_read(),
+            Mode::Addfile => self.add_new_file_or_directory(),
+            Mode::Delfile => self.remove_file_or_directory(),
             Mode::Edit => Ok(()),
+            _ => Ok(()),
         };
         // ------------------------------------------------------------------------------------
     }
@@ -482,24 +559,6 @@ impl App {
 
         text_line.blank()?;
 
-        /*
-                for _ in 0..(self.window_width - self.start_w) as usize
-                    - 4
-                    - self.mostbig_size_filename.len()
-                    - 3
-                    - self.mostbig_size_length
-                    - 2
-                    - 3
-                    - permission.len()
-                    - 3
-                    - created_time.len()
-                    - 1
-                    - 1
-                {
-                    queue!(std::io::stderr(), Print(" "));
-                }
-        */
-
         queue!(std::io::stderr(), SetBackgroundColor(GRUVBOX_BACKGROUND))?;
         Ok(())
     }
@@ -637,6 +696,7 @@ impl App {
 
     pub fn ui(&mut self, print_strings: Vec<String>) -> Result<()> {
         self.nomal_ui(print_strings)?;
+
         match self.mode {
             Mode::Nomal => {}
             Mode::Edit => {}
@@ -645,88 +705,72 @@ impl App {
                     self.input_buffer.to_owned(),
                     self.in_dir_files.get(self.focus_page).unwrap().to_owned(),
                 );
-
-                self.draw_auto_correct(auto_correct)?;
-
-                queue!(
-                    std::io::stderr(),
-                    SetBackgroundColor(GRUVBOX_BACKGROUND),
-                    MoveTo(self.start_w, self.start_h + self.window_height)
-                )?;
-
-                let mut text_line = TextLine::new(self.window_width as usize);
-
-                //text_line.set_frame_style(1);
-
-                text_line
-                    .create_text_box(Color::Blue, 4, 1)
-                    .put("└[".to_string())?;
-
-                text_line
-                    .create_text_box(Color::Blue, self.input_buffer.len(), 1)
-                    .put(self.input_buffer.clone())?;
-
-                text_line.blank()?;
-
-                text_line
-                    .create_text_box(Color::Blue, 4, 1)
-                    .put("]┘".to_string())?;
+                self.draw_auto_correct(auto_correct, "[file open]")?;
             }
+            Mode::Addfile => {
+                let auto_correct = self.find_dir(
+                    self.input_buffer.to_owned(),
+                    self.in_dir_files.get(self.focus_page).unwrap().to_owned(),
+                );
+                self.draw_auto_correct(auto_correct, "[add new file]")?;
+            }
+            Mode::Delfile => {
+                self.draw_remove_file()?;
+            }
+            _ => {}
         }
 
         Ok(())
     }
 
-    fn auto_correct_line(&mut self, data: String, hight: u16) -> Result<()> {
-        queue!(std::io::stderr(), MoveTo(self.start_w + 2, hight,))?;
-        let mut border_line = TextLine::new(self.window_width as usize - 3);
-        border_line
-            .create_text_box(Color::Blue, data.len(), 1)
-            .put(data)?;
-        border_line.blank()?;
+    fn draw_remove_file(&mut self) -> Result<()> {
+        let mut window = Window::new()
+            .set_mode(Mode::Nomal)
+            .set_width(self.window_width as usize - 2);
+        // 線を描き始める一番上（予測変換ウィンドウの上限ライン）------
+        window = window.set_start_hight(self.window_height as usize - 1);
+        window.top_line()?;
+        // -----------------------------------------------------------
 
+        let put_data = format!(
+            "remove \"{}\" ? [Y/N]",
+            self.in_dir_files[self.focus_page][self.focus_index]
+        );
+        // 予測変換たち v -> 予想されるファイル・ディレクトリの集合---------------------------------------------------
+        window.set_color(Color::Red).put(put_data)?;
         Ok(())
     }
 
     fn draw_auto_correct_notfound(&mut self) -> Result<()> {
-        // ---------------------------------------------------------
-        queue!(
-            std::io::stderr(),
-            MoveTo(
-                self.start_w + 1,
-                self.start_h + self.window_height as u16 - 1 - 2
-            )
-        )?;
-        let mut border_line = TextLine::new(self.window_width as usize - 2);
-        border_line.set_beam_style(1);
-        border_line.blank()?;
+        let mut window = Window::new()
+            .set_mode(Mode::Nomal)
+            .set_width(self.window_width as usize - 2);
+        // 線を描き始める一番上（予測変換ウィンドウの上限ライン）------
+        window = window.set_start_hight(self.window_height as usize - 1);
+        window.top_line()?;
+        // -----------------------------------------------------------
 
-        queue!(
-            std::io::stderr(),
-            MoveTo(
-                self.start_w + 2,
-                self.start_h + self.window_height as u16 - 2
-            )
-        )?;
-        let mut notfound_line = TextLine::new(self.window_width as usize - 4);
-        let width = notfound_line.get_width();
-        notfound_line
-            .create_text_box(Color::Red, width, 1)
-            .put("Not found".to_string())?;
-        // ---------------------------------------------------------
+        let put_data = "Not found".to_string();
+        // 予測変換たち v -> 予想されるファイル・ディレクトリの集合---------------------------------------------------
+        window.set_color(Color::Red).put(put_data)?;
         Ok(())
     }
 
-    pub fn draw_auto_correct(&mut self, v: Vec<String>) -> Result<()> {
+    pub fn draw_auto_correct(&mut self, v: Vec<String>, title: &str) -> Result<()> {
         if v.is_empty() {
-            self.draw_auto_correct_notfound()
+            self.draw_auto_correct_notfound()?;
         } else {
-            // 線を描き始める一番上（予測変換ウィンドウの上限ライン）------
-            let mut auto_correct_window = Window::new(0, self.window_height as usize - v.len())
+            let mut auto_correct_window = Window::new()
                 .set_mode(Mode::Nomal)
-                .set_width(self.window_width as usize - 2)
+                .set_width(self.window_width as usize - 2);
+            // 線を描き始める一番上（予測変換ウィンドウの上限ライン）------
+            auto_correct_window = auto_correct_window
+                .set_start_hight(self.window_height as usize - v.len())
                 .set_hight(v.len());
-            auto_correct_window.top_line()?;
+
+            auto_correct_window
+                .set_title(title.to_string())
+                .top_line()?;
             // -----------------------------------------------------------
 
             // 予測変換たち v -> 予想されるファイル・ディレクトリの集合---------------------------------------------------
@@ -734,18 +778,32 @@ impl App {
                 auto_correct_window
                     .set_color(Color::Blue)
                     .put((*item).clone())?;
-                /*
-                // 予想されるファイル・ディレクトリ名を羅列---------------------------------------------------------------
-                self.auto_correct_line(
-                    item.to_owned(),
-                    self.start_h + self.window_height - v.len() as u16 + /*<this>*/index.to_owned() as u16/*</this>*/ - 1,
-                )?;
-                //--------------------------------------------------------------------------------------------------------
-                */
             }
             // -----------------------------------------------------------------------------------------------------------
-            Ok(())
         }
+
+        queue!(
+            std::io::stderr(),
+            SetBackgroundColor(GRUVBOX_BACKGROUND),
+            MoveTo(self.start_w, self.start_h + self.window_height)
+        )?;
+
+        let mut text_line = TextLine::new(self.window_width as usize);
+
+        text_line
+            .create_text_box(Color::Blue, 4, 1)
+            .put("└[".to_string())?;
+
+        text_line
+            .create_text_box(Color::Blue, self.input_buffer.len(), 1)
+            .put(self.input_buffer.clone())?;
+
+        text_line.blank()?;
+
+        text_line
+            .create_text_box(Color::Blue, 4, 1)
+            .put("]┘".to_string())?;
+        Ok(())
     }
 
     pub fn main(&mut self) -> Result<()> {
