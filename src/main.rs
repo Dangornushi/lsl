@@ -209,7 +209,7 @@ impl App {
                         ..
                     }) => {
                         //commandmode
-                        self.mode = Mode::Command;
+                        self.mode = Mode::Cd;
                     }
                     _ => {
                         return Ok(());
@@ -266,12 +266,6 @@ impl App {
                     self.focus_index = self.window_height as usize - 3;
                 }
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
-                ..
-            }) => {
-                self.exit_flag = true;
-            }
 
             Event::Key(KeyEvent {
                 code: KeyCode::Char('n'),
@@ -287,13 +281,20 @@ impl App {
                 self.mode = Mode::Delfile;
             }
 
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(':'),
+                ..
+            }) => {
+                self.mode = Mode::Command;
+            }
+
             _ => {} // WASD ---------------------------------------------------------------------------
         }
         self.cursor.0 = 1;
         return Ok(());
     }
 
-    fn command_key_read(&mut self) -> Result<()> {
+    fn change_directory(&mut self) -> Result<()> {
         if let Event::Key(KeyEvent { code, .. }) = read()? {
             match code {
                 KeyCode::Esc => {
@@ -308,6 +309,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     self.cd(self.input_buffer.clone())?;
+                    self.input_buffer.clear();
                     let _ = std::io::stdout().flush();
                     self.mode = Mode::Nomal;
                 }
@@ -336,8 +338,16 @@ impl App {
                     let _ = std::io::stdout().flush();
 
                     if self.input_buffer.len() != 0 {
-                        let mut file = File::create(self.input_buffer.clone())?;
-                        file.write_all(String::from("").as_bytes())?;
+                        match File::create(self.input_buffer.clone()) {
+                            Ok(mut file) => {
+                                file.write_all(String::from("").as_bytes())?;
+                            }
+                            Err(_) => {
+                                fs::create_dir_all(self.input_buffer.clone())?;
+                            }
+                        };
+
+                        self.input_buffer.clear();
                     }
                     self.mode = Mode::Nomal;
 
@@ -351,8 +361,47 @@ impl App {
         Ok(())
     }
 
+    fn is_dir(&mut self, name: String) -> bool {
+        let path = Path::new(name.as_str());
+
+        // ファイルかどうかを判定
+        if path.is_file() {
+            false
+        } else {
+            // ディレクトリかどうかを判定
+            if path.is_dir() {
+                true
+            } else {
+                println!("{} はファイルでもディレクトリでもありません", name);
+                false
+            }
+        }
+    }
+
+    fn is_file(&mut self, name: String) -> bool {
+        let path = Path::new(name.as_str());
+
+        // ファイルかどうかを判定
+        if path.is_file() {
+            true
+        } else {
+            // ディレクトリかどうかを判定
+            if path.is_dir() {
+                false
+            } else {
+                println!("{} はファイルでもディレクトリでもありません", name);
+                false
+            }
+        }
+    }
+
     fn remove_accept(&mut self) -> Result<()> {
-        fs::remove_file(self.in_dir_files[self.focus_page][self.focus_index].clone())?;
+        let rm_something = self.in_dir_files[self.focus_page][self.focus_index].clone();
+        if self.is_dir(rm_something.clone()) {
+            fs::remove_dir_all(rm_something)?;
+        } else if self.is_file(rm_something.clone()) {
+            fs::remove_file(rm_something)?;
+        }
         self.get_in_dir()?;
         Ok(())
     }
@@ -382,6 +431,7 @@ impl App {
         return match self.mode {
             Mode::Nomal => self.nomal_key_read(max_down),
             Mode::Command => self.command_key_read(),
+            Mode::Cd => self.change_directory(),
             Mode::Addfile => self.add_new_file_or_directory(),
             Mode::Delfile => self.remove_file_or_directory(),
             Mode::Edit => Ok(()),
@@ -656,7 +706,9 @@ impl App {
                 )
             )?;
         }
-        self.cursor.1 += print_strings.len() as u16 - 1;
+        if print_strings.len() > 0 {
+            self.cursor.1 += print_strings.len() as u16 - 1;
+        }
 
         queue!(
             std::io::stderr(),
@@ -700,12 +752,15 @@ impl App {
         match self.mode {
             Mode::Nomal => {}
             Mode::Edit => {}
-            Mode::Command => {
+            Mode::Cd => {
                 let auto_correct = self.find_dir(
                     self.input_buffer.to_owned(),
                     self.in_dir_files.get(self.focus_page).unwrap().to_owned(),
                 );
                 self.draw_auto_correct(auto_correct, "[file open]")?;
+            }
+            Mode::Command => {
+                self.draw_command_window("[command mode]")?;
             }
             Mode::Addfile => {
                 let auto_correct = self.find_dir(
@@ -806,6 +861,90 @@ impl App {
         Ok(())
     }
 
+    fn command_key_read(&mut self) -> Result<()> {
+        if let Event::Key(KeyEvent { code, .. }) = read()? {
+            match code {
+                KeyCode::Esc => {
+                    self.input_buffer.clear();
+                    self.mode = Mode::Nomal;
+                }
+                KeyCode::Char(c) => {
+                    self.input_buffer.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.input_buffer.pop();
+                }
+                KeyCode::Enter => {
+                    if self.input_buffer == 'q'.to_string() {
+                        self.exit_flag = true;
+                    } else {
+                        let mut args: Vec<String> = self
+                            .input_buffer
+                            .trim()
+                            .split(' ')
+                            .map(|s| s.to_string())
+                            .collect();
+
+                        // コマンドを実行
+                        let command = args[0].clone();
+                        args.remove(0);
+                        match Command::new(command).args(args).spawn() {
+                            Ok(mut child) => {
+                                child.wait().unwrap();
+                            }
+                            Err(e) => {
+                                self.input_buffer = e.to_string();
+                            }
+                        }
+
+                        self.render_dir_view()?;
+                    }
+                    self.input_buffer.clear();
+                    self.mode = Mode::Nomal;
+                }
+
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn draw_command_window(&mut self, title: &str) -> Result<()> {
+        let mut command_window = Window::new()
+            .set_mode(Mode::Nomal)
+            .set_width(self.window_width as usize - 2);
+        // 線を描き始める一番上（予測変換ウィンドウの上限ライン）------
+        command_window = command_window.set_start_hight(self.window_height as usize);
+
+        command_window.set_title(title.to_string()).top_line()?;
+        // -----------------------------------------------------------
+        //
+
+        queue!(
+            std::io::stderr(),
+            SetBackgroundColor(GRUVBOX_BACKGROUND),
+            MoveTo(self.start_w, self.start_h + self.window_height)
+        )?;
+
+        let mut text_line = TextLine::new(self.window_width as usize);
+
+        text_line
+            .create_text_box(Color::Blue, 4, 1)
+            .put("└[".to_string())?;
+
+        text_line
+            .create_text_box(Color::Blue, self.input_buffer.len(), 1)
+            .put(self.input_buffer.clone())?;
+
+        text_line.blank()?;
+
+        text_line
+            .create_text_box(Color::Blue, 4, 1)
+            .put("]┘".to_string())?;
+        Ok(())
+    }
+
     pub fn main(&mut self) -> Result<()> {
         self.get_in_dir()?;
         execute!(std::io::stderr(), Hide, EnterAlternateScreen)?;
@@ -831,23 +970,63 @@ impl App {
     }
 }
 
-fn main() -> Result<()> {
-    enable_raw_mode()?;
-    let window_width = size().unwrap().0;
-    let window_height = size().unwrap().1;
-    let mut app = App::new(
-        String::from(""),
-        0,
-        (0, 0),
-        Vec::new(),
-        window_width,
-        window_height,
-        0,
-        0,
-        0,
-    );
+fn help_ascii() -> Result<()> {
+    println!("__/\\\\\\__________________/\\\\\\\\\\\\\\\\\\\\\\_____/\\\\\\_____________");
+    println!(" _\\/\\\\\\________________/\\\\\\/////////\\\\\\__\\/\\\\\\_____________ ");
+    println!("  _\\/\\\\\\_______________\\//\\\\\\______\\///___\\/\\\\\\_____________ ");
+    println!("   _\\/\\\\\\________________\\////\\\\\\__________\\/\\\\\\_____________ ");
+    println!("    _\\/\\\\\\___________________\\////\\\\\\_______\\/\\\\\\_____________");
+    println!("     _\\/\\\\\\______________________\\////\\\\\\____\\/\\\\\\_____________");
+    println!("      _\\/\\\\\\_______________/\\\\\\______\\//\\\\\\___\\/\\\\\\_____________");
+    println!("       _\\/\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\__\\///\\\\\\\\\\\\\\\\\\\\\\/____\\/\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_");
+    println!("        _\\///////////////_____\\///////////______\\///////////////__\n");
+    println!("Usage: lsl [OPTIONS]");
+    Ok(())
+}
 
-    let ret = app.main();
-    let _ = disable_raw_mode();
-    ret
+fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "-v" | "--version" => {
+                println!("Version 0.1.2");
+            }
+            "-h" | "--help" => {
+                help_ascii()?;
+            }
+            "--colortest" => {
+                for color in 0..256 {
+                    print!("\x1b[38;5;{0}mColor{0:03}\x1b[m ", color);
+                    if color % 8 == 7 {
+                        println!("");
+                    }
+                }
+            }
+            _ => {
+                print!("\x1b[38;5;{0}m! Error !: \x1b[m ", 160);
+                println!("Can't resolve arg(s) '{}'", args[1]);
+            }
+        }
+        Ok(())
+    } else {
+        enable_raw_mode()?;
+        let window_width = size().unwrap().0;
+        let window_height = size().unwrap().1;
+        let mut app = App::new(
+            String::from(""),
+            0,
+            (0, 0),
+            Vec::new(),
+            window_width,
+            window_height,
+            0,
+            0,
+            0,
+        );
+
+        let ret = app.main();
+        let _ = disable_raw_mode();
+        ret
+    }
 }

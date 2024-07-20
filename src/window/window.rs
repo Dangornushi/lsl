@@ -11,6 +11,7 @@ pub enum Mode {
     Nomal,
     Command,
     Edit,
+    Cd,
     Addfile,
     Delfile,
 }
